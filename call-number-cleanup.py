@@ -115,11 +115,13 @@ def process_holdings_record(mms_id: str, holding_id: str, api_domain: str, heade
 def cleanup_call_number_subfield(call_number: str) -> str:
     # Add a space between a number then letter pair.
     call_number = re.sub(r'([0-9])([a-zA-Z])', r'\1 \2', call_number)
-    # Add a space in front of any period.
-    call_number = re.sub(r'([^ ])\.', r'\1 .', call_number)
+    # Add a space between a number and a period.
+    call_number = re.sub(r'([0-9])\.', r'\1 .', call_number)
     # Remove the extra periods from any substring matching space period period...
     call_number = re.sub(r' \.\.+', ' .', call_number)
-    # Remove any leading or trailing whitespace
+    # Remove any spaces between a period and a number.
+    call_number = re.sub(r'\. +([0-9])', r'.\1', call_number)
+    # Remove any leading or trailing whitespace.
     call_number = call_number.strip()
     return call_number
 
@@ -143,11 +145,14 @@ def report_for_holdings_record(mms_id: str, holding_id: str, api_domain: str, he
             updated_subfield_h_text = cleanup_call_number_subfield(subfield_h.text)
             if subfield_h.text != updated_subfield_h_text:
                 click.echo(f'{mms_id}, {subfield_h.text}, {updated_subfield_h_text}')
+            else:
+                click.echo(f'{mms_id}, {subfield_h.text}, unchanged')
         for subfield_i in call_number_element.findall("subfield[@code='i']"):
             updated_subfield_i_text = cleanup_call_number_subfield(subfield_i.text)
             if subfield_i.text != updated_subfield_i_text:
                 click.echo(f'{mms_id}, {subfield_i.text}, {updated_subfield_i_text}')
-
+            else:
+                click.echo(f'{mms_id}, {subfield_i.text}, unchanged')
 
 @click.command()
 @click.option('--perform-updates/--report-only', default=False)
