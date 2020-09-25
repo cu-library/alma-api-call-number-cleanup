@@ -34,7 +34,7 @@ def echo_request_exception(e: RequestException):
 
 def get_set_id(set_name: str, api_domain: str, headers: dict) -> str:
     """Search the /sets Alma API endpoint for a set with a given name, returning it's ID."""
-    for offset in range(0, 1000, OFFSET_LIMIT_WINDOW_SIZE):  # If we need 1000 offsets, we've gone too far
+    for offset in range(0, 1000*OFFSET_LIMIT_WINDOW_SIZE, OFFSET_LIMIT_WINDOW_SIZE):  # If we need 1000 offsets, we've gone too far
         params = {'limit': OFFSET_LIMIT_WINDOW_SIZE, 'offset': offset}
         r = requests.get(f'https://{api_domain}/almaws/v1/conf/sets', params=params, headers=headers)
         r.raise_for_status()
@@ -50,7 +50,7 @@ def get_mms_ids(set_id: str, api_domain: str, headers: dict) -> Set[str]:
     """Returns a set of MMS IDs in a given Alma set."""
     mms_ids = set()
     total_mms_ids = 0
-    for offset in range(0, 1000, OFFSET_LIMIT_WINDOW_SIZE):  # If we need 1000 offsets, we've gone too far
+    for offset in range(0, 1000*OFFSET_LIMIT_WINDOW_SIZE, OFFSET_LIMIT_WINDOW_SIZE):  # If we need 1000 offsets, we've gone too far
         params = {'limit': OFFSET_LIMIT_WINDOW_SIZE, 'offset': offset}
         r = requests.get(f'https://{api_domain}/almaws/v1/conf/sets/{set_id}/members', params=params, headers=headers)
         r.raise_for_status()
@@ -63,8 +63,6 @@ def get_mms_ids(set_id: str, api_domain: str, headers: dict) -> Set[str]:
         # The ol' slash-r trick is used here instead of a click progress bar
         # because we don't want to make an initial HTTP request to get the total number of PO Lines in the set.
         click.echo(f'\r{len(mms_ids)}/{total_mms_ids}', nl=False)
-        if 'member' not in json_content:
-            break
     click.echo('')
     assert len(mms_ids) == total_mms_ids
     return mms_ids
@@ -126,12 +124,38 @@ def cleanup_call_number_subfield(call_number: str) -> str:
     return call_number
 
 
+def report_for_mms_id(mms_id: str, api_domain: str, headers: dict):
+    r = requests.get(f'https://{api_domain}/almaws/v1/bibs/{mms_id}/holdings', headers=headers)
+    r.raise_for_status()
+    content = r.json()
+    headers_accept_xml = {'Authorization': headers['Authorization'],
+                          'Accept': 'application/xml'}
+    for holding in content['holding']:
+        report_for_holdings_record(mms_id, holding['holding_id'], api_domain, headers_accept_xml)
+
+
+def report_for_holdings_record(mms_id: str, holding_id: str, api_domain: str, headers: dict):
+    r = requests.get(f'https://{api_domain}/almaws/v1/bibs/{mms_id}/holdings/{holding_id}', headers=headers)
+    r.raise_for_status()
+    holdings_data = etree.fromstring(r.content)
+    for call_number_element in holdings_data.iterfind("record/datafield[@tag='852']"):
+        for subfield_h in call_number_element.findall("subfield[@code='h']"):
+            updated_subfield_h_text = cleanup_call_number_subfield(subfield_h.text)
+            if subfield_h.text != updated_subfield_h_text:
+                click.echo(f'{mms_id}, {subfield_h.text}, {updated_subfield_h_text}')
+        for subfield_i in call_number_element.findall("subfield[@code='i']"):
+            updated_subfield_i_text = cleanup_call_number_subfield(subfield_i.text)
+            if subfield_i.text != updated_subfield_i_text:
+                click.echo(f'{mms_id}, {subfield_i.text}, {updated_subfield_i_text}')
+
+
 @click.command()
+@click.option('--perform-updates/--report-only', default=False)
 @click.option('--set-name', help='The name of the set of holdings records we want to update.')
 @click.option('--set-id', help='The name of the set of holdings records we want to update.')
 @click.option('--api-domain', type=str, default='api-ca.hosted.exlibrisgroup.com')
 @click.option('--api-key', type=str, required=True, help='Alma API Key')
-def main(set_name, set_id, api_domain, api_key):
+def main(perform_updates, set_name, set_id, api_domain, api_key):
     """Call Number Cleanup - Clean up the call number for a set of records in Alma.
 
     A set name or set ID must be provided.
@@ -189,30 +213,36 @@ def main(set_name, set_id, api_domain, api_key):
     # Track any failed MMS IDs
     failed_mms_ids = []
 
-    # Track updated MMS IDs
-    updated_mms_ids = []
+    if perform_updates:
+        # Track updated MMS IDs
+        updated_mms_ids = []
 
-    with click.progressbar(mms_ids_list, show_pos=True,
-                           label='Cleaning up call numbers', item_show_func=lambda x: x) as progress_for_mms_ids:
-        for mms_id in progress_for_mms_ids:
-            try:
-                updated = process_mms_id(mms_id, api_domain, headers)
-                if updated:
-                    updated_mms_ids.append(mms_id)
-            except RequestException as e:
-                failed_mms_ids.append((mms_id, e))
+        with click.progressbar(mms_ids_list, show_pos=True,
+                               label='Cleaning up call numbers', item_show_func=lambda x: x) as progress_for_mms_ids:
+            for mms_id in progress_for_mms_ids:
+                try:
+                    updated = process_mms_id(mms_id, api_domain, headers)
+                    if updated:
+                        updated_mms_ids.append(mms_id)
+                except RequestException as e:
+                    failed_mms_ids.append((mms_id, e))
 
-    if updated_mms_ids:
-        click.echo('Updated call numbers for MMS IDs:')
-        for mms_id in updated_mms_ids:
-            click.echo(mms_id)
+        if updated_mms_ids:
+            click.echo('Updated call numbers for MMS IDs:')
+            for mms_id in updated_mms_ids:
+                click.echo(mms_id)
 
-    # Inform the user about the failed MMS ID updates.
-    if failed_mms_ids:
-        click.echo(f"{len(failed_mms_ids)} records failed to update:")
-        for failed_mms_id, e in failed_mms_ids:
-            click.echo(failed_mms_id)
-            echo_request_exception(e)
+        # Inform the user about the failed MMS ID updates.
+        if failed_mms_ids:
+            click.echo(f"{len(failed_mms_ids)} records failed to update:")
+            for failed_mms_id, e in failed_mms_ids:
+                click.echo(failed_mms_id)
+                echo_request_exception(e)
+    else:
+        click.echo("Running report of call number changes, no updates performed.")
+        for mms_id in mms_ids_list:
+            report_for_mms_id(mms_id, api_domain, headers)
+
 
 if __name__ == '__main__':
     main()
