@@ -9,7 +9,8 @@ import requests
 from lxml import etree
 from requests.exceptions import RequestException
 
-OFFSET_LIMIT_WINDOW_SIZE = 50
+OFFSET_LIMIT_WINDOW_SIZE = 100
+MAX_RECORDS = 10000*OFFSET_LIMIT_WINDOW_SIZE
 
 
 class SetIDNotFoundError(Exception):
@@ -34,7 +35,7 @@ def echo_request_exception(e: RequestException):
 
 def get_set_id(set_name: str, api_domain: str, headers: dict) -> str:
     """Search the /sets Alma API endpoint for a set with a given name, returning it's ID."""
-    for offset in range(0, 1000*OFFSET_LIMIT_WINDOW_SIZE, OFFSET_LIMIT_WINDOW_SIZE):  # If we need 1000 offsets, we've gone too far
+    for offset in range(0, MAX_RECORDS, OFFSET_LIMIT_WINDOW_SIZE):
         params = {'limit': OFFSET_LIMIT_WINDOW_SIZE, 'offset': offset}
         r = requests.get(f'https://{api_domain}/almaws/v1/conf/sets', params=params, headers=headers)
         r.raise_for_status()
@@ -50,10 +51,12 @@ def get_mms_ids(set_id: str, api_domain: str, headers: dict) -> Set[str]:
     """Returns a set of MMS IDs in a given Alma set."""
     mms_ids = set()
     total_mms_ids = 0
-    for offset in range(0, 1000*OFFSET_LIMIT_WINDOW_SIZE, OFFSET_LIMIT_WINDOW_SIZE):  # If we need 1000 offsets, we've gone too far
+    api_calls_remaining = 0
+    for offset in range(0, MAX_RECORDS, OFFSET_LIMIT_WINDOW_SIZE):
         params = {'limit': OFFSET_LIMIT_WINDOW_SIZE, 'offset': offset}
         r = requests.get(f'https://{api_domain}/almaws/v1/conf/sets/{set_id}/members', params=params, headers=headers)
         r.raise_for_status()
+        api_calls_remaining = r.headers.get('X-Exl-Api-Remaining', 0)
         json_content = r.json()
         total_mms_ids = json_content['total_record_count']
         if 'member' not in json_content:
@@ -64,6 +67,7 @@ def get_mms_ids(set_id: str, api_domain: str, headers: dict) -> Set[str]:
         # because we don't want to make an initial HTTP request to get the total number of PO Lines in the set.
         click.echo(f'\r{len(mms_ids)}/{total_mms_ids}', nl=False)
     click.echo('')
+    click.echo(f'{api_calls_remaining} API calls remaining.')
     assert len(mms_ids) == total_mms_ids
     return mms_ids
 
@@ -76,11 +80,11 @@ def process_mms_id(mms_id: str, api_domain: str, headers: dict):
     updated = False
     headers_accept_xml = {'Authorization': headers['Authorization'],
                           'Accept': 'application/xml'}
-    for holding in content['holding']:
-        holding_updated = process_holdings_record(mms_id, holding['holding_id'], api_domain, headers_accept_xml)
-        if holding_updated:
-            updated = True
-
+    if 'holding' in content:
+        for holding in content['holding']:
+            holding_updated = process_holdings_record(mms_id, holding['holding_id'], api_domain, headers_accept_xml)
+            if holding_updated:
+                updated = True
     return updated
 
 
@@ -100,7 +104,6 @@ def process_holdings_record(mms_id: str, holding_id: str, api_domain: str, heade
             if subfield_i.text != updated_subfield_i_text:
                 subfield_i.text = updated_subfield_i_text
                 updated = True
-
     if updated:
         headers_content_type_xml = {'Authorization': headers['Authorization'],
                                     'Content-Type': 'application/xml'}
@@ -108,15 +111,14 @@ def process_holdings_record(mms_id: str, holding_id: str, api_domain: str, heade
                          headers=headers_content_type_xml,
                          data=etree.tostring(holdings_data, encoding='utf-8', xml_declaration=True, standalone=True))
         r.raise_for_status()
-
     return updated
 
 
 def cleanup_call_number_subfield(call_number: str) -> str:
     # Add a space between a number then letter pair.
     call_number = re.sub(r'([0-9])([a-zA-Z])', r'\1 \2', call_number)
-    # Add a space between a number and a period.
-    call_number = re.sub(r'([0-9])\.', r'\1 .', call_number)
+    # Add a space between a number and a period when the period is followed by a letter.
+    call_number = re.sub(r'([0-9])\.([a-zA-Z])', r'\1 .\2', call_number)
     # Remove the extra periods from any substring matching space period period...
     call_number = re.sub(r' \.\.+', ' .', call_number)
     # Remove any spaces between a period and a number.
@@ -132,8 +134,9 @@ def report_for_mms_id(mms_id: str, api_domain: str, headers: dict):
     content = r.json()
     headers_accept_xml = {'Authorization': headers['Authorization'],
                           'Accept': 'application/xml'}
-    for holding in content['holding']:
-        report_for_holdings_record(mms_id, holding['holding_id'], api_domain, headers_accept_xml)
+    if 'holding' in content:
+        for holding in content['holding']:
+            report_for_holdings_record(mms_id, holding['holding_id'], api_domain, headers_accept_xml)
 
 
 def report_for_holdings_record(mms_id: str, holding_id: str, api_domain: str, headers: dict):
@@ -153,6 +156,7 @@ def report_for_holdings_record(mms_id: str, holding_id: str, api_domain: str, he
                 click.echo(f'{mms_id}, {subfield_i.text}, {updated_subfield_i_text}')
             else:
                 click.echo(f'{mms_id}, {subfield_i.text}, unchanged')
+
 
 @click.command()
 @click.option('--perform-updates/--report-only', default=False)
